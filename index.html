@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self' https://overpass-api.de https://overpass.private.coffee https://overpass.kumi.systems https://maps.mail.ru https://ja.wikipedia.org; worker-src 'self'; manifest-src 'self'; base-uri 'self'; object-src 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1b3a5c">
+  <title>観光ガイド付きカーナビ</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./vendor/leaflet/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header>
+    <h1>ドライブガイド</h1>
+    <p class="unofficial">個人が作成した非公式の案内です。地点データは OpenStreetMap の有志による編集に基づき、正確性・最新性は保証しません。現地の表示に従ってください。</p>
+    <a id="toiletNow" href="#" target="_blank" rel="noopener" hidden></a>
+    <nav class="cats" aria-label="カテゴリ">
+      <button class="cat" data-cat="all" aria-pressed="true">すべて</button>
+      <button class="cat" data-cat="toilets" aria-pressed="false">公衆トイレ</button>
+      <button class="cat" data-cat="sightseeing" aria-pressed="false">観光スポット</button>
+    </nav>
+    <div class="toolbar">
+      <button id="refresh" type="button">再取得</button>
+      <button id="mute" type="button" aria-pressed="false">ミュート: OFF</button>
+    </div>
+    <p id="status" role="status">現在地を取得しています…</p>
+  </header>
+
+  <main>
+    <div id="map"></div>
+    <section id="card" hidden>
+      <h2 id="cardName"></h2>
+      <p id="cardDistance"></p>
+      <p id="cardDescription"></p>
+      <p id="cardSource" class="source" hidden></p>
+      <a id="mapsLink" href="#" target="_blank" rel="noopener">Googleマップで案内</a>
+      <button id="readNow" type="button">読み上げる</button>
+    </section>
+    <section id="list">
+      <h2>近くのスポット</h2>
+      <ul id="items"></ul>
+    </section>
+    <section id="about">
+      <h2>データの出典とライセンス</h2>
+      <p>地図・地点データ: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors（<a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">ODbL 1.0</a>）。観光スポット・公衆トイレは、端末から <a href="https://wiki.openstreetmap.org/wiki/Overpass_API" target="_blank" rel="noopener">Overpass API</a> へ現在地の周辺（半径最大3km）だけを問い合わせて取得します。圏外用に同梱の全国公衆トイレ（<a href="./data/toilets-jp.json">data/toilets-jp.json</a>、2026年11月7日作成）は OpenStreetMap から抽出した派生データベースで、ODbL 1.0 で提供しています。</p>
+      <p>スポットの説明文: <a href="https://ja.wikipedia.org/" target="_blank" rel="noopener">Wikipedia日本語版</a>（<a href="https://creativecommons.org/licenses/by-sa/4.0/deed.ja" target="_blank" rel="noopener">CC BY-SA 4.0</a>、記事ごとの出典は説明の下に表示）または OpenStreetMap の description タグ。経路案内は Google マップを開きます。</p>
+      <p>本アプリは個人が作成した非公式のもので、OpenStreetMap Foundation・Wikimedia Foundation・Google とは関係ありません。</p>
+    </section>
+  </main>
+
+  <script src="./vendor/leaflet/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
+  <script src="./app.js"></script>
+</body>
+</html>

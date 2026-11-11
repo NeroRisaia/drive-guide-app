@@ -1,0 +1,16 @@
+{
+  "name": "観光ガイド付きカーナビ",
+  "short_name": "ドライブガイド",
+  "description": "近くの観光スポット・公衆トイレを表示し、案内はGoogleマップへ引き渡す非公式のPWA（データ: © OpenStreetMap contributors）",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#1b3a5c",
+  "background_color": "#f4f6f8",
+  "lang": "ja",
+  "icons": [
+    { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
