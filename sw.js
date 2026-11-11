@@ -3,7 +3,7 @@
 // 観光スポットマップ専用のキャッシュ（接頭辞 spotmap-pages-）。画面を更新したら番号を上げる。
 // 同じ nerorisaia.github.io 上の他アプリ（タイムズ駐車場マップ・喫煙所マップ・つたえる）のキャッシュには触らない。
 const CACHE_PREFIX = 'spotmap-pages-';
-const CACHE = CACHE_PREFIX + 'v1';
+const CACHE = CACHE_PREFIX + 'v2';
 // 同じURL（/drive-guide-app/）で以前公開していた旧版「ドライブガイド」のキャッシュ。このアプリ自身の旧版なので消してよい。
 const OWN_OLD_PREFIXES = ['driveguide-pages-'];
 const SHELL = [

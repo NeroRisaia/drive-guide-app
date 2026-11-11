@@ -7,7 +7,8 @@
 
 const STORAGE = {
   wiki: 'spotmap_wiki', // 名称 → { title, text }
-  last: 'spotmap_last', // 前回の取得結果
+  grid: 'spotmap_grid', // 周辺エリア（格子）ごとの取得結果
+  endpoint: 'spotmap_endpoint', // 前回応答が返った Overpass
 };
 const OVERPASS_ENDPOINTS = [
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
@@ -35,15 +36,28 @@ const KIND_LABELS = {
   castle: '城・城跡',
 };
 // 現在地から近い順に問い合わせ、ENOUGH 件そろったらそこで止める。最大でも半径3km（広域の一括取得はしない）。
-const RADII = [1000, 3000];
+const RADII = [600, 1500, 3000]; // 開始は半径600m。少なければ段階的に広げる
+const LIMITS = [40, 60, 60]; // 1回の取得件数の上限
 const ENOUGH = 3;
-const FETCH_TIMEOUT_MS = 35000; // 1エンドポイントあたりの上限（公開 Overpass は混雑時12〜26秒かかる）
-const HEDGE_DELAY_MS = 8000; // 応答が無ければこの間隔で次のエンドポイントも並行して問い合わせる
+const PARALLEL_START = 2; // 最初から並行して問い合わせるエンドポイント数
+const HEDGE_DELAY_MS = 4000; // 応答が無ければこの間隔で次のエンドポイントも追加する
+const ATTEMPT_TIMEOUT_MS = 30000; // 1回の問い合わせの上限
+const TOTAL_DEADLINE_MS = 45000; // 1段階の上限。超えたら失敗として「再取得」を案内する
+const FAST_FAIL_MS = 5000; // これより早く返った 429/502/503/504 は混雑による門前払いとみなす
+const FAST_FAIL_WAIT_MS = 1500;
+const FAST_FAIL_RETRIES = 2;
+const GRID_DEG = 0.01; // 端末キャッシュの格子（緯度経度0.01度、約1km）
+const CACHE_NEAR_M = 800; // 取得地点がこの距離以内のキャッシュを使う
+const GRID_FRESH_MS = 60 * 60 * 1000; // 1時間以内のキャッシュは取り直さない
+const GRID_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7日を過ぎたキャッシュは捨てる
+const GRID_MAX = 40; // 保存するマスの数の上限（古いものから消す）
+const GRID_ITEMS_MAX = 60;
+const PREFETCH_COUNT = 3; // 説明文を裏側で先読みするのは最寄りの3件だけ
+const PREFETCH_DELAY_MS = 3000;
 const REFINE_ACCURACY_M = 100;
 const REFINE_MOVE_M = 300; // 概略位置と精密位置がこれ以上ずれたら取り直す
 const REFETCH_MOVE_M = 2000; // 前回の取得地点からこれ以上動いたら取り直す
 const LIST_MAX = 30;
-const LAST_ITEMS_MAX = 100;
 const WIKI_CACHE_MAX = 200;
 const LOCATED_ZOOM = 15;
 const NO_NAME_VIEWPOINT = '展望地（名称の登録なし）';
@@ -66,6 +80,7 @@ const el = {
   items: document.getElementById('items'),
 };
 
+const perf = { firstSpotMs: null, firstSource: null, endpoint: null }; // 動作確認用（端末内だけ。どこにも送らない）
 const state = {
   pos: null,
   heading: null, // 走行中の進行方向（度）。停車中は null
@@ -162,32 +177,69 @@ function osmUrl(item) {
 }
 
 // ---------- Overpass ----------
-function buildQuery(lat, lon, radius) {
+// 応答を軽くする: 必要なのは中心座標とタグだけ（メタ情報・形状は取らない）。件数に上限を付け、
+// サーバーの受付を通りやすくするため timeout / maxsize も小さめにする。
+function buildQuery(lat, lon, radius, limit) {
   const around = `(around:${radius},${lat},${lon})`;
-  return `[out:json][timeout:25];(${FILTERS.replaceAll('AROUND', around)});out center qt;`;
+  return `[out:json][timeout:20][maxsize:67108864];(${FILTERS.replaceAll('AROUND', around)});out tags center qt ${limit};`;
 }
 
-// 応答が無ければ HEDGE_DELAY_MS ごとに次のエンドポイントも並行して試し、最初の成功を採用して残りは中断する。
+function endpointOrder() {
+  // 前回応答が返ったエンドポイントを先頭にする
+  let sticky = null;
+  try {
+    sticky = localStorage.getItem(STORAGE.endpoint);
+  } catch {
+    // 保存できない環境でも既定の順で問い合わせる
+  }
+  return OVERPASS_ENDPOINTS.includes(sticky) ? [sticky, ...OVERPASS_ENDPOINTS.filter((u) => u !== sticky)] : OVERPASS_ENDPOINTS;
+}
+
+// 最初から PARALLEL_START か所へ並行して問い合わせ、残りは HEDGE_DELAY_MS ごとに追加する。
+// 1回の問い合わせは ATTEMPT_TIMEOUT_MS、1段階全体は TOTAL_DEADLINE_MS で打ち切る。
+// 混雑ですぐ返る 429/502/503/504 は、同じエンドポイントへ少し待って再試行する（回数に上限あり）。
+// 最初の成功を採用して残りは中断する。
 async function fetchOverpass(query) {
   const stop = new AbortController();
+  const deadline = Date.now() + TOTAL_DEADLINE_MS;
   const attempt = async (url, index) => {
-    await sleep(index * HEDGE_DELAY_MS);
-    if (stop.signal.aborted) throw new Error('stopped');
-    const one = new AbortController();
-    const timer = setTimeout(() => one.abort(), FETCH_TIMEOUT_MS);
-    stop.signal.addEventListener('abort', () => one.abort());
-    try {
-      const res = await fetch(url, { method: 'POST', body: new URLSearchParams({ data: query }), signal: one.signal });
-      if (!res.ok) throw new Error(String(res.status));
-      const data = await res.json();
-      if (/error/i.test(data.remark || '')) throw new Error('runtime');
-      return data;
-    } finally {
-      clearTimeout(timer);
+    await sleep(index < PARALLEL_START ? 0 : (index - PARALLEL_START + 1) * HEDGE_DELAY_MS);
+    for (let retry = 0; ; retry++) {
+      if (stop.signal.aborted) throw new Error('stopped');
+      const left = deadline - Date.now();
+      if (left < 1000) throw new Error('deadline');
+      const one = new AbortController();
+      const timer = setTimeout(() => one.abort(), Math.min(ATTEMPT_TIMEOUT_MS, left));
+      const onStop = () => one.abort();
+      stop.signal.addEventListener('abort', onStop);
+      const started = Date.now();
+      try {
+        const res = await fetch(url, { method: 'POST', body: new URLSearchParams({ data: query }), signal: one.signal });
+        if (!res.ok) {
+          const busy = [429, 502, 503, 504].includes(res.status) && Date.now() - started < FAST_FAIL_MS;
+          if (busy && retry < FAST_FAIL_RETRIES) {
+            await sleep(FAST_FAIL_WAIT_MS);
+            continue;
+          }
+          throw new Error(String(res.status));
+        }
+        const data = await res.json();
+        if (/error/i.test(data.remark || '')) throw new Error('runtime');
+        try {
+          localStorage.setItem(STORAGE.endpoint, url);
+        } catch {
+          // 保存できなくても結果は使う
+        }
+        perf.endpoint = url;
+        return data;
+      } finally {
+        clearTimeout(timer);
+        stop.signal.removeEventListener('abort', onStop);
+      }
     }
   };
   try {
-    return await Promise.any(OVERPASS_ENDPOINTS.map(attempt));
+    return await Promise.any(endpointOrder().map(attempt));
   } catch (error) {
     if (error.errors && error.errors.some((e) => e.message === '400')) throw new Error('Overpass がクエリを拒否しました（400）。');
     throw new Error('Overpass API が混雑しています。少し後に「再取得」を押してください。');
@@ -233,6 +285,86 @@ function withDistances(items, from) {
   return items.sort((a, b) => (a.distance ?? 1e9) - (b.distance ?? 1e9));
 }
 
+// ---------- 端末側キャッシュ（周辺エリア単位） ----------
+// 取得地点の座標を GRID_DEG（約1km）の格子に丸めたマスごとに、取得結果を端末に保存する。
+// 同じ周辺を再び開いたら、まずキャッシュを即表示し、古ければ裏側で取り直す。
+function cellKey(pos) {
+  return `${Math.round(pos.lat / GRID_DEG)}_${Math.round(pos.lon / GRID_DEG)}`;
+}
+
+function loadGrid() {
+  const grid = loadJson(STORAGE.grid, {});
+  const now = Date.now();
+  for (const [key, entry] of Object.entries(grid)) {
+    if (!entry || !entry.pos || !Array.isArray(entry.items) || now - entry.fetchedAt > GRID_TTL_MS) delete grid[key];
+  }
+  return grid;
+}
+
+function saveToGrid(pos, radius, items) {
+  const grid = loadGrid();
+  grid[cellKey(pos)] = {
+    pos,
+    radius,
+    fetchedAt: Date.now(),
+    items: items.slice(0, GRID_ITEMS_MAX).map(({ id, name, named, kind, lat, lon, tags }) => ({ id, name, named, kind, lat, lon, tags })),
+  };
+  const keys = Object.keys(grid).sort((a, b) => grid[a].fetchedAt - grid[b].fetchedAt);
+  while (keys.length > GRID_MAX) delete grid[keys.shift()];
+  saveJson(STORAGE.grid, grid);
+}
+
+// 現在地のマスと周りの8マスから、取得地点が CACHE_NEAR_M 以内のものを選ぶ（近いもの優先）
+function findCached(pos) {
+  const grid = loadGrid();
+  const [y, x] = cellKey(pos).split('_').map(Number);
+  let best = null;
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const entry = grid[`${y + dy}_${x + dx}`];
+      if (!entry) continue;
+      const d = haversine(pos, entry.pos);
+      if (d > CACHE_NEAR_M) continue;
+      if (!best || d < best.d) best = { entry, d };
+    }
+  }
+  return best && best.entry;
+}
+
+function latestCached() {
+  const entries = Object.values(loadGrid());
+  return entries.sort((a, b) => b.fetchedAt - a.fetchedAt)[0] || null;
+}
+
+// キャッシュを表示する（同じ周辺の新しい取得結果がすでに出ていればそちらを優先）
+function showCached(entry, from) {
+  if (!entry) return false;
+  const r = state.result;
+  if (r.source === 'live' && state.fetchPos && haversine(state.fetchPos, entry.pos) < CACHE_NEAR_M) return false;
+  Object.assign(r, {
+    items: withDistances(entry.items.map((i) => ({ ...i })), from || entry.pos),
+    radius: entry.radius,
+    fetchedAt: entry.fetchedAt,
+    source: 'cache',
+    error: null,
+  });
+  render();
+  updateStatus();
+  return true;
+}
+
+// 現在地の周辺を表示する: キャッシュがあれば即表示、無いか古ければ取得する
+function loadAround(pos) {
+  const entry = findCached(pos);
+  if (entry) showCached(entry, pos);
+  if (entry && Date.now() - entry.fetchedAt < GRID_FRESH_MS) {
+    state.fetchPos = entry.pos; // 新しいキャッシュなので取り直さない（「再取得」では取り直す）
+    prefetchDescriptions();
+    return;
+  }
+  refresh();
+}
+
 // ---------- 取得 ----------
 async function refresh() {
   if (!state.pos) return;
@@ -244,21 +376,26 @@ async function refresh() {
   result.error = null;
   updateStatus();
   try {
-    for (const radius of RADII) {
-      const data = await fetchOverpass(buildQuery(pos.lat, pos.lon, radius));
+    for (let step = 0; step < RADII.length; step++) {
+      const radius = RADII[step];
+      const data = await fetchOverpass(buildQuery(pos.lat, pos.lon, radius, LIMITS[step]));
       if (run !== state.run) return;
+      // Overpass の応答が届いた時点で、説明文を待たずに近い順でピンと一覧を出す
       const items = withDistances(toItems(data.elements || []), pos).filter((i) => i.distance <= radius);
-      const settled = items.length >= ENOUGH || radius === RADII[RADII.length - 1];
-      // 段階の途中で、すでに出ている一覧（前回結果など）を少ない件数で置き換えない
+      const settled = items.length >= ENOUGH || step === RADII.length - 1;
+      // 段階の途中で、すでに出ている一覧（キャッシュなど）を少ない件数で置き換えない
       if (settled || items.length >= result.items.length) {
         Object.assign(result, { items, radius, source: 'live', fetchedAt: Date.now() });
         if (state.pos) withDistances(result.items, state.pos);
         render();
-        saveLast();
       }
       result.loading = !settled;
       updateStatus();
-      if (settled) return;
+      if (settled) {
+        saveToGrid(pos, radius, items);
+        prefetchDescriptions();
+        return;
+      }
     }
   } catch (error) {
     if (run !== state.run) return;
@@ -274,9 +411,9 @@ function updateStatus() {
   if (r.loading && !r.items.length) {
     text = '観光スポットを取得中…（公開サーバーが混雑していると数十秒かかります）';
   } else if (r.error) {
-    text = `取得に失敗しました${r.items.length ? `（前回の${r.items.length}件を表示）` : ''}。${r.error}`;
+    text = `取得に失敗しました${r.items.length ? `（端末に保存した結果${r.items.length}件を表示・${formatAge(r.fetchedAt)}）` : ''}。${r.error}`;
   } else if (r.fetchedAt) {
-    const old = r.source === 'restored' ? `・前回の結果（${formatAge(r.fetchedAt)}）` : '';
+    const old = r.source === 'cache' ? `・端末に保存した結果（${formatAge(r.fetchedAt)}）` : '';
     text = `観光スポット ${r.items.length}件（${formatDistance(r.radius)}以内${old}）${r.loading ? ' 更新中…' : ''}`;
   } else {
     text = state.pos ? '観光スポットを取得中…' : '現在地を取得しています…';
@@ -285,33 +422,40 @@ function updateStatus() {
   el.empty.hidden = !(r.fetchedAt && !r.loading && !r.error && r.items.length === 0 && r.source === 'live');
 }
 
-function saveLast() {
-  const r = state.result;
-  if (!state.fetchPos || !r.fetchedAt) return;
-  saveJson(STORAGE.last, {
-    pos: state.fetchPos,
-    radius: r.radius,
-    fetchedAt: r.fetchedAt,
-    items: r.items.slice(0, LAST_ITEMS_MAX).map(({ id, name, named, kind, lat, lon, tags }) => ({ id, name, named, kind, lat, lon, tags })),
-  });
+// 起動直後（位置情報の前）は、最後に保存した周辺を表示しておく
+function restoreLast() {
+  try {
+    localStorage.removeItem('spotmap_last'); // このアプリの前の版の保存データ（旧形式）
+  } catch {
+    // 消せなくても動作に影響しない
+  }
+  const entry = latestCached();
+  if (!entry) return;
+  map.setView([entry.pos.lat, entry.pos.lon], LOCATED_ZOOM);
+  showCached(entry);
 }
 
-function restoreLast() {
-  const saved = loadJson(STORAGE.last, null);
-  if (!saved || !saved.pos || !Array.isArray(saved.items)) return;
-  map.setView([saved.pos.lat, saved.pos.lon], LOCATED_ZOOM);
-  Object.assign(state.result, {
-    items: withDistances(saved.items, saved.pos),
-    radius: saved.radius,
-    fetchedAt: saved.fetchedAt,
-    source: 'restored',
-  });
-  render();
-  updateStatus();
+// 説明文はタップ時に取得するのが基本。裏側で先読みするのは最寄りの PREFETCH_COUNT 件だけで、
+// ピン・一覧を出した後に1件ずつ順番に取得する（一覧の表示は待たせない）。
+const prefetched = new Set();
+let prefetchTimer = null;
+function prefetchDescriptions() {
+  clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(async () => {
+    const targets = state.result.items.filter((i) => i.named && !i.tags.description && !prefetched.has(i.id)).slice(0, PREFETCH_COUNT);
+    for (const item of targets) {
+      prefetched.add(item.id);
+      await describe(item);
+    }
+  }, PREFETCH_DELAY_MS);
 }
 
 // ---------- 描画 ----------
 function render() {
+  if (perf.firstSpotMs == null && state.result.items.length) {
+    perf.firstSpotMs = Math.round(performance.now()); // ページ読み込み開始から最初のスポットを出すまで
+    perf.firstSource = state.result.source;
+  }
   renderMarkers();
   renderList();
   updateNearestButton();
@@ -667,12 +811,12 @@ function onPosition(position, source) {
   render();
   if (first) {
     state.refined = accurate;
-    refresh();
+    loadAround(pos);
   } else if (!state.refined && accurate) {
     state.refined = true;
-    if (haversine(state.fetchPos, pos) >= REFINE_MOVE_M) refresh();
+    if (haversine(state.fetchPos, pos) >= REFINE_MOVE_M) loadAround(pos);
   } else if (!state.result.loading && state.fetchPos && haversine(state.fetchPos, pos) >= REFETCH_MOVE_M) {
-    refresh();
+    loadAround(pos);
   }
 }
 
@@ -797,7 +941,7 @@ el.refresh.addEventListener('click', () => {
 restoreLast();
 startGeolocation();
 
-window.__spotmap = { map, state, geoLog, followPaused, userPaused, buildQuery }; // 動作確認用
+window.__spotmap = { map, state, perf, geoLog, followPaused, userPaused, buildQuery }; // 動作確認用
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {});
