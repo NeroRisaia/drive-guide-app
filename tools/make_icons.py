@@ -1,22 +1,36 @@
+"""アプリアイコン（深緑地に、橙の丸と白の「観」）を作る。
+
+    python -I tools/make_icons.py icons
+"""
 import sys
-from PIL import Image, ImageDraw
+
+from PIL import Image, ImageDraw, ImageFont
 
 OUT = sys.argv[1]
+GREEN = (36, 69, 58, 255)
+ORANGE = (194, 87, 26, 255)
+WHITE = (255, 255, 255, 255)
+FONT_CANDIDATES = ["YuGothB.ttc", "meiryob.ttc"]  # OS のフォントフォルダから探す
+
+
+def font(size):
+    for path in FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def make(size, path):
-    img = Image.new("RGBA", (size, size), (27, 58, 92, 255))
+    img = Image.new("RGBA", (size, size), GREEN)
     d = ImageDraw.Draw(img)
-    pad = size // 8
-    d.rounded_rectangle([pad, pad, size - pad, size - pad], radius=size // 10, fill=(255, 210, 74, 255))
-    cx, cy = size // 2, int(size * 0.42)
-    r = size // 6
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 255, 255, 255))
-    d.polygon([(cx - r * 0.6, cy + r * 0.5), (cx + r * 0.6, cy + r * 0.5), (cx, int(size * 0.72))],
-              fill=(255, 255, 255, 255))
-    d.ellipse([cx - r // 3, cy - r // 3, cx + r // 3, cy + r // 3], fill=(27, 58, 92, 255))
+    pad = size // 10
+    d.ellipse([pad, pad, size - pad, size - pad], fill=ORANGE)
+    d.text((size / 2, size / 2), "観", font=font(int(size * 0.5)), fill=WHITE, anchor="mm")
     img.save(path)
 
 
-for size in (192, 512):
-    make(size, f"{OUT}/icon-{size}.png")
+make(192, f"{OUT}/icon-192.png")
+make(512, f"{OUT}/icon-512.png")
+print("ok")
