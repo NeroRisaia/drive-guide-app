@@ -7,7 +7,7 @@
 ## 機能
 
 - 現在地の周りの **観光スポット** を地図と一覧で表示します（扱うのは観光スポットだけです）。
-- 全国の観光スポットのデータをアプリに同梱しており、現在地の周りの分（緯度経度1度の格子ごとのファイル）だけを読み込んで、端末の中で近い順に探します。外部のサーバーへの問い合わせを待たないため、すぐに表示されます。一度読み込んだ地域は圏外でも表示できます（地図画像と説明文は通信が必要です）。
+- 全国の観光スポットのデータをアプリに同梱しており、現在地の周りの分（緯度経度0.25度の格子ごとのファイル）だけを読み込んで、端末の中で近い順に探します。外部のサーバーへの問い合わせを待たないため、すぐに表示されます。起動時は地図の部品より先に、前回の位置・端末の概略位置の周りのデータの読み込みを始めます。一度読み込んだ地域は圏外でも表示できます（地図画像と説明文は通信が必要です）。
 - 表示する範囲: 現在地から半径 600m に3件以上あればそこまで、無ければ 1.5km、3km、10km と広げます（近い順に最大100件）。
 - 地図は現在地に追従します。地図を手で動かす（ドラッグ・ピンチ・ホイール・ダブルタップ・＋－ボタン）と、手を離した時点から5秒間は追従を止めて表示位置をそのままにし、5秒後に現在地へ戻ります。
 - 「現在地」で現在地へ移動し、そのまま追従します（追従の一時停止中でもすぐ戻ります）。
@@ -22,7 +22,7 @@
 
 本リポジトリの地点データは OpenStreetMap から抽出した派生データベースであり、Open Database License (ODbL) 1.0 で提供されます（https://opendatacommons.org/licenses/odbl/1-0/）。データ取得時点は [`data/spots/index.json`](data/spots/index.json) の `osm_base`（OpenStreetMap のデータベース時刻）に記録しています。
 
-- 対象ファイル: `data/spots/` 内の JSON（`index.json` と、格子ごとの `<南端の緯度>_<西端の経度>.json`）
+- 対象ファイル: `data/spots/` 内の JSON（`index.json` と、緯度経度0.25度の格子ごとの `<南端の緯度>_<西端の経度>.json`）
 - 出典: © OpenStreetMap contributors（https://www.openstreetmap.org/copyright）
 - 抽出条件（日本国内）:
   - `tourism=attraction`（観光名所）、`tourism=museum`（博物館）、`tourism=gallery`（美術館）、`tourism=zoo`（動物園）、`tourism=aquarium`（水族館）、`tourism=theme_park`（テーマパーク）— 名称（`name`）のあるもののみ
@@ -46,7 +46,7 @@
 
 ## コードのライセンス
 
-上記のデータとは別に、本リポジトリのコード部分（`index.html`、`app.js`、`styles.css`、`sw.js`、`manifest.webmanifest`、`tools/` 内のスクリプト、`icons/` のアイコン画像）は MIT License です。全文は [`LICENSE-CODE.txt`](LICENSE-CODE.txt) をご覧ください。MIT License はデータ（`data/`、および OpenStreetMap・Wikipedia 由来の内容）と同梱ライブラリには適用されません。
+上記のデータとは別に、本リポジトリのコード部分（`index.html`、`boot.js`、`app.js`、`styles.css`、`sw.js`、`manifest.webmanifest`、`tools/` 内のスクリプト、`icons/` のアイコン画像）は MIT License です。全文は [`LICENSE-CODE.txt`](LICENSE-CODE.txt) をご覧ください。MIT License はデータ（`data/`、および OpenStreetMap・Wikipedia 由来の内容）と同梱ライブラリには適用されません。
 
 同梱ライブラリ: `vendor/leaflet/` の Leaflet 1.9.4 は BSD-2-Clause License（© 2010-2023 Vladimir Agafonkin, © 2010-2011 CloudMade）です。
 

@@ -1,7 +1,7 @@
 'use strict';
 
 // 観光スポットマップ（非公式）
-// OpenStreetMap から抽出した全国の観光スポットを、緯度経度1度の格子ごとの JSON としてアプリに同梱する。
+// OpenStreetMap から抽出した全国の観光スポットを、緯度経度0.25度の格子ごとの JSON としてアプリに同梱する。
 // 現在地の周りの格子のファイルだけを読み込み、端末内で近い順に探して表示する（Overpass への問い合わせはしない）。
 // 説明文は OpenStreetMap の description タグ、無ければ Wikipedia 日本語版（記事ごとに出典を表示）。
 // 経路案内は Google マップを開く。地図の追従・「最寄り」はタイムズ駐車場マップ（作者の別アプリ）と同じ仕様。
@@ -27,16 +27,16 @@ const KIND_LABELS = {
 const RADII = [600, 1500, 3000, 10000];
 const ENOUGH = 3;
 const ITEMS_MAX = 100; // 一覧・ピンに出す件数の上限（近い順）
-const TILE_DEG = 1; // 同梱データの格子（緯度経度1度）
 const DATA_TIMEOUT_MS = 15000;
 const PREFETCH_COUNT = 3; // 説明文を裏側で先読みするのは最寄りの3件だけ
-const PREFETCH_DELAY_MS = 3000;
+const PREFETCH_DELAY_MS = 1500;
 const REFINE_ACCURACY_M = 100;
 const REFINE_MOVE_M = 300; // 概略位置と精密位置がこれ以上ずれたら探し直す
 const REFETCH_MOVE_M = 300; // 前回探した地点からこれ以上動いたら探し直す（端末内の検索なので軽い）
 const LIST_MAX = 30;
 const WIKI_CACHE_MAX = 200;
 const LOCATED_ZOOM = 15;
+const NO_POSITION_FALLBACK_MS = 8000; // 現在地がこの時間内に届かなければ、地図の中心の周りを出す
 const NO_NAME_VIEWPOINT = '展望地（名称の登録なし）';
 
 const el = {
@@ -62,6 +62,7 @@ const el = {
 const perf = { firstSpotMs: null, firstSource: null }; // 動作確認用（端末内だけ。どこにも送らない）
 const state = {
   pos: null,
+  posAt: 0, // 最後に現在地が届いた時刻
   heading: null, // 走行中の進行方向（度）。停車中は null
   fetchPos: null,
   refined: false,
@@ -157,20 +158,25 @@ function osmUrl(item) {
 
 // ---------- 同梱データ ----------
 // data/spots/index.json: データ取得時点・種別の一覧・格子ごとの件数
-// data/spots/<南端の緯度>_<西端の経度>.json: その格子の地点 [緯度×10^5, 経度×10^5, 名称, 種別番号, Wikipedia日本語版の記事名, description, OSM要素ID]
+// data/spots/<南端の緯度>_<西端の経度>.json: 緯度経度 0.25 度の格子ごとの地点
+//   [緯度×10^5, 経度×10^5, 名称, 種別番号, Wikipedia日本語版の記事名, description, OSM要素ID]
+// 読み込みは boot.js（head で先に実行）が始めている。index.json の到着を待たずに地点ファイルも並行して読み込む。
 // Service Worker が読み込んだファイルを端末に保存するので、2回目以降は圏外でも読める。
+const boot = window.__spotBoot;
+const tiles = boot.tiles; // 格子 → Promise<{points} | null>（boot.js と共有）
+const tileItems = new Map(); // 格子 → 変換済みの地点
 let indexPromise = null;
-const tiles = new Map(); // 格子 → Promise<items[]>
+let indexLoaded = null;
 
 function loadIndex() {
   if (!indexPromise) {
-    indexPromise = fetch('./data/spots/index.json', { signal: AbortSignal.timeout(DATA_TIMEOUT_MS) })
-      .then((res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        return res.json();
-      })
+    const first = boot.index;
+    boot.index = null; // boot.js の分は1回だけ使う（失敗したら次は読み直す）
+    indexPromise = (first || fetchIndex())
       .then((index) => {
+        if (!index) throw new Error('404');
         showDataInfo(index);
+        indexLoaded = index;
         return index;
       })
       .catch((error) => {
@@ -181,23 +187,18 @@ function loadIndex() {
   return indexPromise;
 }
 
+function fetchIndex() {
+  return fetch('./data/spots/index.json', { signal: AbortSignal.timeout(DATA_TIMEOUT_MS) }).then((res) => {
+    if (!res.ok) throw new Error(String(res.status));
+    return res.json();
+  });
+}
+
 function showDataInfo(index) {
   const [y, m, d] = index.osm_date.split('-').map(Number);
   const when = `${y}年${m}月${d}日`;
   el.dataInfo.textContent = `データ: OpenStreetMap ${when}時点`;
   el.aboutData.textContent = `データ取得時点: ${when}（OpenStreetMap のデータベース時刻 ${index.osm_base}）。全国 ${index.total.toLocaleString('ja-JP')}件。`;
-}
-
-function tileKeysAround(pos, radius) {
-  const dLat = radius / 111320;
-  const dLon = radius / (111320 * Math.cos((pos.lat * Math.PI) / 180));
-  const keys = [];
-  for (let y = Math.floor((pos.lat - dLat) / TILE_DEG); y <= Math.floor((pos.lat + dLat) / TILE_DEG); y++) {
-    for (let x = Math.floor((pos.lon - dLon) / TILE_DEG); x <= Math.floor((pos.lon + dLon) / TILE_DEG); x++) {
-      keys.push(`${y * TILE_DEG}_${x * TILE_DEG}`);
-    }
-  }
-  return keys;
 }
 
 function pointToItem(p, kinds) {
@@ -214,21 +215,18 @@ function pointToItem(p, kinds) {
   };
 }
 
-function loadTile(key, kinds) {
-  if (!tiles.has(key)) {
-    const promise = fetch(`./data/spots/${key}.json`, { signal: AbortSignal.timeout(DATA_TIMEOUT_MS) })
-      .then((res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        return res.json();
-      })
-      .then((data) => data.points.map((p) => pointToItem(p, kinds)))
-      .catch((error) => {
-        tiles.delete(key); // 失敗した格子は次の「再取得」で読み直す
-        throw error;
-      });
-    tiles.set(key, promise);
-  }
-  return tiles.get(key);
+// 失敗した格子は捨てて、次の「再取得」で読み直す
+function loadTile(key) {
+  const promise = boot.loadTile(key);
+  return promise.catch((error) => {
+    if (tiles.get(key) === promise) tiles.delete(key);
+    throw error;
+  });
+}
+
+function itemsOfTile(key, data, kinds) {
+  if (!tileItems.has(key)) tileItems.set(key, data ? data.points.map((p) => pointToItem(p, kinds)) : []);
+  return tileItems.get(key);
 }
 
 function withDistances(items, from) {
@@ -242,6 +240,21 @@ function referencePos() {
   return { lat: c.lat, lon: c.lng };
 }
 
+// 半径 radius の円にかかる格子の地点を、近い順に返す
+async function itemsAround(pos, radius) {
+  const known = indexLoaded && indexLoaded.tiles; // 届いていれば、地点のない格子は読まない
+  const pending = boot.tileKeys(pos.lat, pos.lon, radius).filter((key) => !known || known[key]).map((key) => {
+    const promise = loadTile(key);
+    promise.catch(() => {}); // index.json に無い格子（海上など）の失敗は使わない
+    return [key, promise];
+  });
+  const index = await loadIndex();
+  const lists = await Promise.all(
+    pending.filter(([key]) => index.tiles[key]).map(([key, promise]) => promise.then((data) => itemsOfTile(key, data, index.kinds))),
+  );
+  return withDistances(lists.flat().map((item) => ({ ...item })), pos);
+}
+
 // 基準地点の周りを端末内で探して、近い順にピンと一覧を出す（説明文は待たない）
 async function refresh() {
   state.run += 1;
@@ -252,12 +265,16 @@ async function refresh() {
   result.error = null;
   updateStatus();
   try {
-    const index = await loadIndex();
-    const keys = tileKeysAround(pos, RADII[RADII.length - 1]).filter((key) => index.tiles[key]);
-    const lists = await Promise.all(keys.map((key) => loadTile(key, index.kinds)));
+    // まず半径3km分の格子だけを読み、そこで3件以上あれば表示する。足りなければ10km分を読む。
+    // 地点ファイルの読み込みを先に始めてから index.json を待つ（往復を1回減らす）。
+    let all = await itemsAround(pos, RADII[RADII.length - 2]);
     if (run !== state.run) return;
-    const all = withDistances(lists.flat().map((item) => ({ ...item })), pos);
-    const radius = RADII.find((r) => all.filter((i) => i.distance <= r).length >= ENOUGH) || RADII[RADII.length - 1];
+    let radius = RADII.find((r) => all.filter((i) => i.distance <= r).length >= ENOUGH);
+    if (!radius) {
+      all = await itemsAround(pos, RADII[RADII.length - 1]);
+      if (run !== state.run) return;
+      radius = RADII.find((r) => all.filter((i) => i.distance <= r).length >= ENOUGH) || RADII[RADII.length - 1];
+    }
     const items = all.filter((i) => i.distance <= radius).slice(0, ITEMS_MAX);
     state.fetchPos = pos;
     Object.assign(result, { items, radius, source: 'bundled', fetchedAt: Date.now(), loading: false });
@@ -295,7 +312,8 @@ function updateStatus() {
   el.empty.hidden = !(r.fetchedAt && !r.loading && !r.error && r.items.length === 0);
 }
 
-// 起動直後（位置情報の前）は、最後に表示した位置の周りを出しておく
+// 起動直後（位置情報の前）は、最後に表示した位置の周りを出しておく。
+// 前回の位置が無い初回は、関係のない地域（地図の初期位置）のデータを読まないよう、現在地を待つ。
 function restoreLast() {
   for (const key of OLD_STORAGE_KEYS) {
     try {
@@ -304,9 +322,16 @@ function restoreLast() {
       // 消せなくても動作に影響しない
     }
   }
-  const last = loadJson(STORAGE.lastPos, null);
-  if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) map.setView([last.lat, last.lon], LOCATED_ZOOM);
-  refresh();
+  const last = boot.last;
+  if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) {
+    map.setView([last.lat, last.lon], LOCATED_ZOOM);
+    refresh();
+  }
+}
+
+// 現在地が使えない・まだ届かないときは、地図の中心の周りを出す
+function showAroundCenterIfNothing() {
+  if (!state.pos && !state.result.fetchedAt && !state.result.loading) refresh();
 }
 
 // 位置情報が使えないあいだは、地図を動かした先の周りを探す
@@ -314,7 +339,12 @@ let moveTimer = null;
 map.on('moveend', () => {
   if (state.pos) return;
   clearTimeout(moveTimer);
-  moveTimer = setTimeout(refresh, 300);
+  moveTimer = setTimeout(() => {
+    if (state.pos) return;
+    const c = map.getCenter();
+    if (state.fetchPos && haversine(state.fetchPos, { lat: c.lat, lon: c.lng }) < 50) return; // 同じ場所は探し直さない
+    refresh();
+  }, 300);
 });
 
 // 説明文はタップ時に取得するのが基本。裏側で先読みするのは最寄りの PREFETCH_COUNT 件だけで、
@@ -503,14 +533,16 @@ async function wikiExtract(title) {
 }
 
 async function wikiSearch(name) {
+  // 検索で最上位の記事の冒頭を、1回の問い合わせで取る（検索 → 本文の2往復をまとめる）
   const res = await fetch(
-    'https://ja.wikipedia.org/w/api.php?action=query&list=search&format=json&origin=*&srlimit=1&srsearch=' +
+    'https://ja.wikipedia.org/w/api.php?action=query&generator=search&gsrlimit=1&prop=extracts&exintro&explaintext&redirects=1&format=json&origin=*&gsrsearch=' +
       encodeURIComponent(name),
     { signal: AbortSignal.timeout(15000) },
   );
   const data = await res.json();
-  const hit = ((data.query && data.query.search) || [])[0];
-  return hit ? wikiExtract(hit.title) : null;
+  const page = Object.values((data.query && data.query.pages) || {})[0];
+  if (!page || !page.extract) return null;
+  return { title: page.title, text: page.extract.trim() };
 }
 
 async function describe(item) {
@@ -558,6 +590,7 @@ function logGeo(event, detail = {}) {
 }
 
 const NEAREST_FOLLOW_PAUSE_MS = 10000;
+const NEAREST_FRESH_MS = 15000; // 「最寄り」で、これより新しい現在地は測り直さずに使う
 let followPausedUntil = 0;
 function followPaused() {
   return Date.now() < followPausedUntil;
@@ -684,6 +717,7 @@ function onPosition(position, source) {
   state.heading = speed >= AHEAD_SPEED_MS && Number.isFinite(heading) ? heading : null;
   const first = state.pos == null;
   state.pos = pos;
+  state.posAt = Date.now();
   if (first) logGeo('ok', { source, accuracy: Math.round(position.coords.accuracy) });
   if (!userMarker) userMarker = L.marker([pos.lat, pos.lon], { title: '現在地' }).addTo(map);
   else userMarker.setLatLng([pos.lat, pos.lon]);
@@ -706,24 +740,22 @@ let watching = false;
 function startGeolocation() {
   if (!('geolocation' in navigator)) {
     setGeoStatus('この端末・ブラウザは位置情報に対応していないため、現在地は表示していません。');
+    showAroundCenterIfNothing();
     return;
   }
   if (watching) return;
   watching = true;
   // GPS の測位を待たず、まず端末が持っている概略位置で検索を始める。
-  navigator.geolocation.getCurrentPosition(
-    (position) => {
-      if (state.pos == null) onPosition(position, 'coarse');
-    },
-    () => {},
-    { enableHighAccuracy: false, maximumAge: 600000, timeout: 5000 },
-  );
+  boot.coarse.then((position) => {
+    if (position && state.pos == null) onPosition(position, 'coarse');
+  });
   navigator.geolocation.watchPosition(
     (position) => onPosition(position, 'gps'),
     (error) => {
       watching = false;
       logGeo('error', { code: error && error.code });
       if (!state.pos) setGeoStatus(geoFailureText(error));
+      showAroundCenterIfNothing();
     },
     { enableHighAccuracy: true, maximumAge: 10000 },
   );
@@ -793,6 +825,13 @@ el.nearest.addEventListener('click', () => {
     setGeoStatus('この端末・ブラウザは位置情報に対応していないため、現在地は表示していません。');
     return;
   }
+  // 直前（NEAREST_FRESH_MS 以内）に届いた現在地があれば、測位を待たずにすぐ探す
+  if (state.pos && Date.now() - state.posAt < NEAREST_FRESH_MS) {
+    followPausedUntil = Date.now() + NEAREST_FOLLOW_PAUSE_MS;
+    goNearest(state.pos);
+    startGeolocation();
+    return;
+  }
   setGeoStatus('現在地を取得して、最寄りの観光スポットを探しています…');
   navigator.geolocation.getCurrentPosition(
     (position) => {
@@ -822,6 +861,7 @@ el.refresh.addEventListener('click', () => {
 
 restoreLast();
 startGeolocation();
+setTimeout(showAroundCenterIfNothing, NO_POSITION_FALLBACK_MS);
 
 window.__spotmap = { map, state, perf, geoLog, followPaused, userPaused }; // 動作確認用
 
