@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self' https://maps.mail.ru https://overpass-api.de https://overpass.private.coffee https://overpass.kumi.systems https://ja.wikipedia.org; worker-src 'self'; manifest-src 'self'; base-uri 'self'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self' https://ja.wikipedia.org; worker-src 'self'; manifest-src 'self'; base-uri 'self'; object-src 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#24453a">
   <title>観光スポットマップ（非公式）</title>
@@ -21,13 +21,14 @@
       <button id="refresh" type="button">再取得</button>
     </div>
     <p id="status" role="status">現在地を取得しています…</p>
+    <p id="dataInfo"></p>
     <p id="geoStatus" role="status" hidden></p>
   </header>
 
   <main>
     <div id="mapWrap">
       <div id="map"></div>
-      <div id="empty" hidden>この付近（半径3km以内）に登録された観光スポットがありません（OpenStreetMap に未登録の地点は表示されません）</div>
+      <div id="empty" hidden>この付近（半径10km以内）に登録された観光スポットがありません（OpenStreetMap に未登録の地点は表示されません）</div>
     </div>
     <section id="card" hidden>
       <h2 id="cardName"></h2>
@@ -45,7 +46,8 @@
     </section>
     <section id="about">
       <h2>データの出典とライセンス</h2>
-      <p>地図・地点データ: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors（<a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">Open Database License (ODbL) 1.0</a>）。観光スポットは、端末から <a href="https://wiki.openstreetmap.org/wiki/Overpass_API" target="_blank" rel="noopener">Overpass API</a> へ現在地の周辺（半径1km、足りなければ3kmまで）だけを問い合わせて取得します。</p>
+      <p>地図・地点データ: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors（<a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">Open Database License (ODbL) 1.0</a>）。観光スポットは OpenStreetMap から抽出した派生データベースで、<a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">Open Database License (ODbL) 1.0</a> で提供しています（<a href="./data/spots/index.json">データ JSON</a>）。アプリに同梱しており、現在地の周りの分だけを端末で読み込みます。</p>
+      <p id="aboutData"></p>
       <p>対象: OpenStreetMap の tourism=attraction（観光名所）・museum（博物館）・gallery（美術館）・viewpoint（展望地）・zoo（動物園）・aquarium（水族館）・theme_park（テーマパーク）と historic=castle（城・城跡）。名称の登録がないもの（展望地を除く）と、access=private／no のものは除いています。</p>
       <p>スポットの説明文: <a href="https://ja.wikipedia.org/" target="_blank" rel="noopener">Wikipedia日本語版</a>（<a href="https://creativecommons.org/licenses/by-sa/4.0/deed.ja" target="_blank" rel="noopener">CC BY-SA 4.0</a>、記事ごとの出典は説明の下に表示）または OpenStreetMap の description タグ。名称での検索のため、別の記事が表示される場合があります。経路案内は Google マップを開きます。</p>
       <p>本アプリは個人が作成した非公式のものです。広告・課金・利用者データの送信はありません。</p>

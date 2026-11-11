@@ -3,7 +3,7 @@
 // 観光スポットマップ専用のキャッシュ（接頭辞 spotmap-pages-）。画面を更新したら番号を上げる。
 // 同じ nerorisaia.github.io 上の他アプリ（タイムズ駐車場マップ・喫煙所マップ・つたえる）のキャッシュには触らない。
 const CACHE_PREFIX = 'spotmap-pages-';
-const CACHE = CACHE_PREFIX + 'v2';
+const CACHE = CACHE_PREFIX + 'v3';
 // 同じURL（/drive-guide-app/）で以前公開していた旧版「ドライブガイド」のキャッシュ。このアプリ自身の旧版なので消してよい。
 const OWN_OLD_PREFIXES = ['driveguide-pages-'];
 const SHELL = [
@@ -19,6 +19,7 @@ const SHELL = [
   './vendor/leaflet/images/marker-icon.png',
   './vendor/leaflet/images/marker-icon-2x.png',
   './vendor/leaflet/images/marker-shadow.png',
+  './data/spots/index.json', // 格子ごとの地点ファイル（data/spots/*.json）は、読み込んだものから端末に保存する
 ];
 
 self.addEventListener('install', (event) => {
@@ -53,7 +54,7 @@ self.addEventListener('activate', (event) => {
 });
 
 // このアプリの範囲（scope = /drive-guide-app/）の同一オリジン GET だけをキャッシュする。
-// 地図タイル・Overpass・Wikipedia は対象外。キャッシュがあれば即返し、裏で更新する（次回起動で反映）。
+// 地図タイル・Wikipedia は対象外。キャッシュがあれば即返し、裏で更新する（次回起動で反映）。
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== self.location.origin) return;
